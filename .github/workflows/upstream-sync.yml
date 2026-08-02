@@ -1,0 +1,115 @@
+name: Upstream sync
+
+# Open a PR bringing NousResearch/hermes-agent main into our fork, so upstream
+# changes land through review instead of arriving on the agent host unseen.
+#
+# The agent box tracks THIS fork at a reviewed commit — never upstream main.
+# `hermes update` runs `git reset --hard` followed by `uv sync`, so without this
+# gate every sync would execute unreviewed code and install unreviewed packages
+# on a host holding live agent credentials.
+#
+# The PR is the gate. Socket.dev reviews the dependency diff (see socket.yml);
+# the smoke job below checks the thing still imports and starts.
+
+on:
+  schedule:
+    - cron: "0 14 * * 1" # Mondays, 14:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.merge.outputs.branch }}
+      behind: ${{ steps.check.outputs.behind }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: How far behind are we?
+        id: check
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch -q upstream main
+          behind=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          echo "$behind commits behind upstream"
+
+      - name: Merge upstream onto a branch
+        id: merge
+        if: steps.check.outputs.behind != '0'
+        run: |
+          branch="upstream-sync/$(date -u +%Y%m%d)"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          git config user.name  "upstream-sync"
+          git config user.email "noreply@mmntm.net"
+          git checkout -b "$branch"
+          # Never auto-resolve. A conflict means someone must look — that is the
+          # point of the gate, and silently picking a side defeats it.
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort
+            echo "::error::Merge conflict with upstream — resolve by hand on $branch"
+            exit 1
+          fi
+          git push -u origin "$branch"
+
+      - name: Open the PR
+        if: steps.check.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr create \
+            --title "upstream: sync ${{ steps.check.outputs.behind }} commits from NousResearch/hermes-agent" \
+            --body "$(cat <<'BODY'
+Automated upstream sync. **Do not merge until the dependency review is clean.**
+
+### What to check before merging
+
+- **Socket.dev review on this PR** — new or changed dependency capabilities:
+  install scripts, network access, filesystem access, shell access, env-var
+  reads. This is the reason the gate exists; version bumps alone are not the risk.
+- **Smoke job** below — the package imports and the CLI starts.
+- Anything touching `hermes_cli/`, `agent/`, `gateway/`, or `tools/` that would
+  change how the agent handles credentials or executes commands.
+
+### After merging
+
+The agent host does **not** auto-update. Deploy deliberately, pinned:
+
+```sh
+ssh gps@100.99.28.2
+sudo -u hermes git -C /home/hermes/hermes-agent fetch origin
+sudo -u hermes git -C /home/hermes/hermes-agent checkout <merged-sha>
+sudo systemctl restart 'hermes-gateway@*'
+```
+
+See `docs/HERMES-UPDATES.md` in mmntmnet/claw-ops.
+BODY
+)" \
+            --base main --head "${{ steps.merge.outputs.branch }}"
+
+  smoke:
+    needs: sync
+    if: needs.sync.outputs.behind != '0'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.branch }}
+      - uses: astral-sh/setup-uv@v5
+      - name: Install and smoke-test
+        run: |
+          uv venv
+          uv pip install -q -e .
+          # Does it import, and does the CLI come up at all?
+          uv run python -c "import hermes_cli, agent, gateway; print('imports ok')"
+          uv run python -m hermes_cli.main --version

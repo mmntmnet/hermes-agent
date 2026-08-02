@@ -1,0 +1,50 @@
+# Socket.dev configuration for mmntmnet/hermes-agent.
+#
+# Why this repo: upstream moves fast (PRs in the 71,000s) and we sync in large
+# batches. `hermes update` runs `git reset --hard` then `uv sync` on a box that
+# holds agent credentials — 233 locked Python packages plus five npm manifests,
+# none of which a human reviews per sync. Dependabot tells us a version is old;
+# it says nothing about a package that just gained a postinstall script or
+# started making network calls. That gap is what this closes.
+
+version: 2
+
+projectIgnorePaths:
+  # Docs site and generated assets — not shipped to the agent host.
+  - "website/**"
+  - "docs/**"
+  - "infographic/**"
+  - "infograficos/**"
+  - "assets/**"
+  - "contributors/**"
+
+issueRules:
+  # Block-worthy: these are the supply-chain attacks we actually care about on a
+  # box with live credentials.
+  installScripts: true
+  telemetry: true
+  obfuscatedFile: true
+  obfuscatedRequire: true
+  shellScriptOverride: true
+  didYouMean: true            # typosquats
+  malware: true
+  gitDependency: true
+  httpDependency: true
+  troll: true
+  suspiciousStarActivity: true
+  criticalCVE: true
+  cve: true
+
+  # Capability changes worth a human look on a sync PR.
+  networkAccess: true
+  filesystemAccess: true
+  shellAccess: true
+  envVars: true
+
+  # Noise on a repo this size — a 233-package lock will always have some.
+  # Turn these back on once the baseline is clean.
+  unmaintained: false
+  deprecated: false
+  trivialPackage: false
+  unpopularPackage: false
+  licenseChange: false
